@@ -1,0 +1,23 @@
+node_modules/
+*.log
+.scratch/
+package-lock.json
+
+# Local agent state and code indexes
+.pi/
+.agents/
+.claude/
+.gitnexus/
+.cocoindex_code/
+AGENTS.md
+CLAUDE.md
+
+# Credentials and local history backups
+.env
+.env.*
+*.pem
+*.key
+*.bundle
+auth.json
+credentials.json
+.npmrc
