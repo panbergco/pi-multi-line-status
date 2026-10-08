@@ -1,5 +1,5 @@
 import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
-import { appendFileSync } from "node:fs";
+import { appendFileSync, statSync } from "node:fs";
 import { StatusWorker, type AccountingSnapshot, type AccountingRequest, type UsageSnapshot as FooterUsageSnapshot } from "./status-worker-host.ts";
 // The widget catalogue and its two storage layers, shared verbatim with the `pmls` command line.
 import { WIDGETS, load as loadVisibility, readLayer as readVisibilityLayer, writeLayer as writeVisibilityLayer, globalFile as visibilityGlobalFile, projectFile as visibilityProjectFile, extensionKey, extensionName, isExtensionKey, writeRoster } from "./visibility.mjs";
@@ -1853,9 +1853,20 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
       const render = () => tui.requestRender();
       requestFooterRender = render;
       const unsub = footerData.onBranchChange(render);
+      // pi-rotate re-measures in the background; an idle footer would keep showing the old
+      // figure until something else repainted it (seen: 10% shown while the file said 13%).
+      let rotateSeen = 0;
+      const rotateWatch = setInterval(() => {
+        try {
+          const m = statSync(rotateUsageFile()).mtimeMs;
+          if (m !== rotateSeen) { rotateSeen = m; render(); }
+        } catch { /* no pi-rotate: nothing to follow */ }
+      }, 10_000);
+      rotateWatch.unref?.();
 
       return {
         dispose() {
+          clearInterval(rotateWatch);
           unsub();
           if (requestFooterRender === render) requestFooterRender = null;
         },
