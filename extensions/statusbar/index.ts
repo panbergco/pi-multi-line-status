@@ -25,6 +25,8 @@ import {
   parseCodexProviderUsage,
   type ProviderUsageSnapshot,
   type ProviderUsageWindow,
+  rotateUsageFor,
+  fresherUsage,
 } from "./provider-usage.ts";
 
 type GitChangeKind = "staged" | "modified" | "untracked" | "conflicted";
@@ -1243,6 +1245,7 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
   let lastSessionSpeedSampleMs = 0;
   let footerUsageSnapshot: FooterUsageSnapshot = emptyFooterUsageSnapshot();
   let latestProviderUsage: ProviderUsageSnapshot | null = null;
+  const stamp = (u: ProviderUsageSnapshot | undefined) => (u ? { ...u, fetchedAt: Date.now() } : null);
   let latestGitSnapshot: GitSnapshot | null = null;
   let latestGitSnapshotFingerprint: string | null = null;
   let latestGitFetchState: GitFetchState = { status: "idle" };
@@ -1521,10 +1524,19 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
     };
   };
 
+  const rotateUsageFile = () => {
+    const dir = process.env.PI_CODING_AGENT_DIR?.trim();
+    return resolve(dir ? expandHomePath(dir) : resolve(homedir(), ".pi", "agent"), "pi-rotate-usage.json");
+  };
+
   const getVisibleProviderUsage = (ctx: ExtensionContext): ProviderUsageSnapshot | null => {
-    if (!latestProviderUsage) return null;
     const model = ctx.model;
     if (!model) return null;
+    // pi-rotate measures every account, including ones the headers below never name.
+    const rotated = rotateUsageFor(model.provider, rotateUsageFile());
+    const headers = latestProviderUsage?.provider === model.provider ? latestProviderUsage : null;
+    if (rotated) return fresherUsage(rotated, headers);
+    if (!latestProviderUsage) return null;
     // A snapshot is only valid for the provider it was captured from; a model
     // switch to another provider hides it instead of showing stale data.
     if (latestProviderUsage.provider !== model.provider) return null;
@@ -2218,9 +2230,9 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
     // guessed data); other providers leave it untouched and render gating
     // keeps it hidden.
     if (provider === "openai-codex") {
-      latestProviderUsage = parseCodexProviderUsage(event.headers) ?? null;
+      latestProviderUsage = stamp(parseCodexProviderUsage(event.headers));
     } else if (provider === "anthropic" && model && footerCtx.modelRegistry.isUsingOAuth(model)) {
-      latestProviderUsage = parseAnthropicProviderUsage(event.headers) ?? null;
+      latestProviderUsage = stamp(parseAnthropicProviderUsage(event.headers));
     } else {
       return;
     }

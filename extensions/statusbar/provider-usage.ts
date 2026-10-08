@@ -1,4 +1,6 @@
-export type ProviderUsageSource = "openai-codex" | "anthropic";
+import { readFileSync, statSync } from "node:fs";
+/** A provider id; with pi-rotate, any account it measures (`anthropic-ps`, `openai-codex-pb`, …). */
+export type ProviderUsageSource = string;
 
 export type ProviderUsageHeaders = Readonly<Record<string, string | undefined>>;
 
@@ -19,6 +21,8 @@ export type ProviderUsageSnapshot = {
   primary: ProviderUsageWindow;
   secondary: ProviderUsageWindow;
   plan?: string;
+  /** When these figures were measured, Unix ms. */
+  fetchedAt?: number;
 };
 
 function parseFiniteNumber(raw: string | undefined): number | undefined {
@@ -138,7 +142,61 @@ function formatPercent(value: number): string {
   return String(Math.round(value));
 }
 
-/** Format the compact footer value. Parsed snapshots always produce finite percentages. */
-export function formatProviderUsage(usage: ProviderUsageSnapshot): string {
-  return `${usage.primary.label} ${formatPercent(usage.primary.usedPercent)}% · ${usage.secondary.label} ${formatPercent(usage.secondary.usedPercent)}%`;
+/**
+ * pi-rotate's latest reading for one account, from the file it keeps for every session.
+ *
+ * Response headers only describe the account that answered the last reply, and only
+ * under the provider names this file knows; pi-rotate measures every account, so the
+ * footer shows the serving account's 5h and weekly figures whichever account it is.
+ * ponytail: reads pi-rotate's state file (its own format); an exported event would
+ * decouple them, add it when that format changes.
+ */
+let rotateCache: { file: string; mtimeMs: number; rows: unknown } | undefined;
+export function rotateUsageFor(slotId: string, file: string): ProviderUsageSnapshot | undefined {
+  try {
+    const mtimeMs = statSync(file).mtimeMs;
+    if (!rotateCache || rotateCache.file !== file || rotateCache.mtimeMs !== mtimeMs) {
+      rotateCache = { file, mtimeMs, rows: JSON.parse(readFileSync(file, "utf8")) };
+    }
+  } catch {
+    return undefined;
+  }
+  const rows = rotateCache.rows;
+  const row: any = Array.isArray(rows) ? rows.find((r: any) => r?.slotId === slotId) : undefined;
+  // Model-scoped windows (`7d:Fable`) apply to one model only; the account-wide ones are what bind.
+  const window = (label: string) => row?.windows?.find((w: any) => w?.label === label && !w.scopeModel
+    && Number.isFinite(w.usedPercent));
+  const five = window("5h");
+  const week = window("7d");
+  if (!five || !week) return undefined;
+  return {
+    provider: slotId,
+    primary: { label: "5h", usedPercent: five.usedPercent, resetAt: five.resetAt },
+    secondary: { label: "week", usedPercent: week.usedPercent, resetAt: week.resetAt },
+    fetchedAt: row.fetchedAt,
+  };
+}
+
+const STALE_AFTER_MS = 15 * 60_000;
+const windowName = (label: string) => (/^(7d|weekly)$/i.test(label) ? "week" : label);
+const clock = (ms: number) => new Date(ms).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+
+/**
+ * Format the compact footer value: each figure says it is USED and which window it is,
+ * because a bare "5h 37% · 7d 10%" beside pi-rotate's "% left" read as the opposite.
+ */
+export function formatProviderUsage(usage: ProviderUsageSnapshot, now = Date.now()): string {
+  const { primary, secondary } = usage;
+  const resets = primary.resetAt && primary.resetAt > now ? ` (resets ${clock(primary.resetAt)})` : "";
+  const age = usage.fetchedAt && now - usage.fetchedAt > STALE_AFTER_MS
+    ? ` · measured ${Math.round((now - usage.fetchedAt) / 60_000)}m ago` : "";
+  return `${windowName(primary.label)} ${formatPercent(primary.usedPercent)}% used${resets} · `
+    + `${windowName(secondary.label)} ${formatPercent(secondary.usedPercent)}% used${age}`;
+}
+
+/** The fresher of two readings for the same account; either may be missing. */
+export function fresherUsage(a: ProviderUsageSnapshot | undefined | null, b: ProviderUsageSnapshot | undefined | null) {
+  if (!a) return b ?? null;
+  if (!b) return a;
+  return (b.fetchedAt ?? 0) > (a.fetchedAt ?? 0) ? b : a;
 }
